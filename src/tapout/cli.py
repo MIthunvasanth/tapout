@@ -402,6 +402,68 @@ def watch(
         pass
 
 
+# --------------------------------------------------------------------------
+# tap buddy  — Windows tray icon
+# --------------------------------------------------------------------------
+
+buddy_app = typer.Typer(
+    invoke_without_command=True,
+    no_args_is_help=False,
+    help="System tray buddy: usage % icon, toast warnings, one-click resume.",
+)
+app.add_typer(buddy_app, name="buddy")
+
+
+@buddy_app.callback(invoke_without_command=True)
+def buddy_default(
+    ctx: typer.Context,
+    dry_run: bool = typer.Option(False, "--dry-run", help="Run one poll cycle, print the result, exit."),
+    detached: bool = typer.Option(False, "--detached", help="Run with no console window (used by autostart)."),
+) -> None:
+    """Launch the tray icon (default). See `tap buddy --help` for subcommands."""
+    if ctx.invoked_subcommand is not None:
+        return
+
+    from . import tray
+
+    if dry_run:
+        tray.run_dry_run()
+        return
+
+    if detached and tray.relaunch_detached_if_needed():
+        return  # relaunched consoleless; this process's job is done
+
+    tray.run_buddy()
+
+
+@buddy_app.command("install-autostart")
+def buddy_install_autostart() -> None:
+    """Launch tapout buddy silently on login (Windows Startup shortcut)."""
+    from . import tray
+
+    if sys.platform != "win32":
+        err.print("[yellow]Autostart is Windows-only for now.[/yellow]")
+        raise typer.Exit(code=1)
+    try:
+        path = tray.install_autostart()
+    except Exception as exc:
+        err.print(f"[red]Could not create autostart shortcut:[/red] {exc}")
+        raise typer.Exit(code=1)
+    console.print(f"[green]Autostart installed:[/green] {path}")
+
+
+@buddy_app.command("uninstall-autostart")
+def buddy_uninstall_autostart() -> None:
+    """Remove the autostart shortcut, if present."""
+    from . import tray
+
+    removed = tray.uninstall_autostart()
+    if removed:
+        console.print("[green]Autostart removed.[/green]")
+    else:
+        console.print("[dim]No autostart shortcut was installed.[/dim]")
+
+
 def main() -> None:
     """Entry point for the `tap`/`tapout` console scripts and `python -m tapout`.
 

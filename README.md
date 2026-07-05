@@ -20,6 +20,24 @@ Installs two equivalent console commands, `tap` and `tapout`. Python 3.10+.
 
 Run `tap scan` to see which agents are installed on this machine.
 
+## Buddy (Windows tray icon)
+
+```bash
+pip install tapout[tray]
+tap buddy                        # try it now
+tap buddy install-autostart      # or launch silently on every login
+```
+
+![tapout buddy tray icon — screenshot coming after Slice 3 lands](docs/buddy-screenshot-placeholder.png)
+
+A tray icon that shows Claude's usage % at a glance (green/amber/red, gray when no data) and warns before you're stuck:
+
+- **85% of your 5-hour window** — a toast asks if you want to prep a handoff now, one click.
+- **100% (limit hit)** — a toast lets you tag straight into Codex/Gemini/Cursor, whichever are installed and ready.
+- **90% of your 7-day window** — a heads-up that your weekly budget is running low.
+
+Right-click the icon for "Prep handoff now", "Resume in →", and a read-only status window. `tap buddy` alone is Windows-only for now; `pip install tapout` (no `[tray]`) is unaffected either way.
+
 ## Zero-effort capture (Claude Code plugin)
 
 Install the bundled Claude Code plugin so capture happens automatically — no manual `tap out`:

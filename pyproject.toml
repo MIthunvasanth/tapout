@@ -34,7 +34,12 @@ dependencies = [
 
 [project.optional-dependencies]
 clipboard = ["pyperclip>=1.8"]
-dev = ["pytest>=8.0", "pyperclip>=1.8"]
+tray = [
+    "pystray>=0.19",
+    "Pillow>=10.0",
+    "windows-toasts>=1.0; sys_platform == 'win32'",
+]
+dev = ["pytest>=8.0", "pyperclip>=1.8", "pystray>=0.19", "Pillow>=10.0", "windows-toasts>=1.0; sys_platform == 'win32'"]
 
 [project.scripts]
 tap = "tapout.cli:main"
