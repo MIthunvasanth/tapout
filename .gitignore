@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+.pytest_cache/
+dist/
+build/
+.venv/
+venv/
+
+# tapout scratch: history and cache are transient runtime state.
+# HANDOFF.md + .tapout/task-state.json are meant to be committed by users.
+.tapout/history.jsonl
+.tapout/*.cache
