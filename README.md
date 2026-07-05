@@ -46,7 +46,7 @@ tap codex     # or tap cursor, tap gemini
 
 > **Note:** the packaged Claude Code plugin includes a SessionEnd hook and `/tapout:pause`
 > slash command intended to run capture automatically. On some Claude Code versions the
-> plugin runtime does not wire these up (tracked in issue #TBD, Slice 2.5). Until that's
+> plugin runtime does not wire these up (tracked in [issue #1](https://github.com/MIthunvasanth/tapout/issues/1), Slice 2.5). Until that's
 > fixed, use the command above — it's the exact same capture logic the hook would invoke.
 
 ## Zero-install via uvx
