@@ -1,0 +1,27 @@
+{
+  "description": "tapout auto-capture: refresh HANDOFF.md + .tapout/task-state.json before compaction and at session end.",
+  "hooks": {
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PLUGIN_ROOT}/hooks/run_capture.py\"",
+            "timeout": 200
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PLUGIN_ROOT}/hooks/run_capture.py\"",
+            "timeout": 200
+          }
+        ]
+      }
+    ]
+  }
+}

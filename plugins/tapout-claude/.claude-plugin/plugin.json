@@ -1,0 +1,11 @@
+{
+  "name": "tapout-claude",
+  "version": "0.1.0",
+  "description": "Auto-capture task state on compact/exit so you can tap out to another agent when Claude hits a limit.",
+  "author": { "name": "Mithun" },
+  "homepage": "https://pypi.org/project/tapout/",
+  "license": "MIT",
+  "keywords": ["handoff", "usage-limit", "codex", "gemini", "cursor"],
+  "hooks": "./hooks/hooks.json",
+  "commands": ["./commands/pause.md"]
+}

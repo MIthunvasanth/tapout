@@ -32,6 +32,12 @@ class AgentEntry(BaseModel):
     config_dirs: list[str] = Field(default_factory=list)
     resume_style: ResumeStyle = "clipboard_only"
     launch_template: list[str] = Field(default_factory=list)
+    # How the opening prompt reaches the child (cli_prompt style only):
+    #   "argv"        prompt substituted into launch_template as an argument
+    #   "stdin"       prompt written to the child's stdin (bypasses cmd.exe)
+    #   "file:<flag>" prompt written to a file, path passed via <flag>
+    #   "clipboard"   prompt only copied to clipboard; child launched bare
+    prompt_delivery: str = "argv"
     version_probe: Optional[VersionProbe] = None
     notes: str = ""
 
@@ -41,6 +47,17 @@ class AgentEntry(BaseModel):
             "clipboard_gui": "prompt injection via clipboard",
             "clipboard_only": "clipboard (manual paste)",
         }[self.resume_style]
+
+    def delivery_kind(self) -> str:
+        """Normalized delivery: 'argv' | 'stdin' | 'file' | 'clipboard'."""
+        if self.prompt_delivery.startswith("file:"):
+            return "file"
+        return self.prompt_delivery
+
+    def file_flag(self) -> Optional[str]:
+        if self.prompt_delivery.startswith("file:"):
+            return self.prompt_delivery.split(":", 1)[1]
+        return None
 
 
 class RegistryError(Exception):

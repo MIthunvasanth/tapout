@@ -20,6 +20,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 from . import __version__
+from .capture import CaptureError, read_hook_stdin, run_capture
 from .detect import detect_all, resolve_executable
 from .handoff import (
     SUMMARIZATION_PROMPT,
@@ -27,6 +28,7 @@ from .handoff import (
     tapout_paths,
     write_artifacts,
 )
+from .monitor import run_statusline, run_watch
 from .registry import RegistryError, load_registry
 from .resume import (
     ResumeError,
@@ -248,6 +250,10 @@ def _resume(agent: str, dry_run: bool) -> None:
     console.print(f"  opening prompt {clip_note} ({len(plan.opening)} chars)")
     if plan.exe:
         console.print(f"  launch: {plan.exe}")
+    if plan.delivery == "stdin":
+        console.print("  prompt delivery: [green]stdin[/green] (BatBadBut-safe, headless)")
+    elif plan.delivery == "file":
+        console.print(f"  prompt delivery: [green]file[/green] → {plan.prompt_file}")
 
     if plan.guard_reason:
         console.print(f"[yellow]BatBadBut guard:[/yellow] {plan.guard_reason}")
@@ -309,6 +315,72 @@ def gemini(dry_run: bool = typer.Option(False, "--dry-run", help="Show what woul
 def cursor(dry_run: bool = typer.Option(False, "--dry-run", help="Show what would launch, don't launch.")) -> None:
     """Resume the task in Cursor (alias for `tap resume cursor`)."""
     _resume("cursor", dry_run)
+
+
+# --------------------------------------------------------------------------
+# tap capture  — machine-invoked (hooks, /tapout:pause)
+# --------------------------------------------------------------------------
+
+@app.command()
+def capture(
+    agent: str = typer.Option("claude", "--agent", help="Source agent producing the state."),
+    session_transcript: Optional[str] = typer.Option(
+        None, "--session-transcript", help="Path to the session transcript (JSONL)."
+    ),
+    hook_stdin: bool = typer.Option(
+        False, "--hook-stdin", help="Read the CC hook JSON (transcript_path, cwd) from stdin."
+    ),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing task-state.json."),
+) -> None:
+    """Non-interactive capture: summarize the session into handoff artifacts."""
+    repo = Path(os.environ.get("CLAUDE_PROJECT_DIR") or Path.cwd())
+    transcript = session_transcript
+
+    if hook_stdin:
+        data = read_hook_stdin()
+        transcript = transcript or data.get("transcript_path")
+        if data.get("cwd"):
+            repo = Path(data["cwd"])
+
+    tpath = Path(transcript) if transcript else None
+    try:
+        state = run_capture(repo, agent, tpath, force)
+    except CaptureError as exc:
+        err.print(f"[yellow]tap capture:[/yellow] {exc}")
+        raise typer.Exit(code=1)
+
+    if state is None:
+        console.print("[dim]tap capture: existing handoff kept (use --force to overwrite).[/dim]")
+        return
+
+    record_history(repo, from_agent=agent, to_agent="(capture)",
+                   task_title=state.task_title, event="capture")
+    console.print(f"[green]tap capture:[/green] handoff refreshed — '{state.task_title}'")
+
+
+# --------------------------------------------------------------------------
+# tap statusline / tap watch  — usage monitor
+# --------------------------------------------------------------------------
+
+@app.command()
+def statusline() -> None:
+    """Claude Code statusline sink: prints 'tap: N%' and records state for `tap watch`."""
+    run_statusline()
+
+
+@app.command()
+def watch(
+    once: bool = typer.Option(False, "--once", help="Print one reading and exit."),
+    interval: float = typer.Option(2.0, "--interval", help="Seconds between readings."),
+    duration: Optional[float] = typer.Option(
+        None, "--duration", help="Stop after N seconds (default: run until Ctrl-C)."
+    ),
+) -> None:
+    """Live-monitor Claude Code usage; hints 'run: tap codex' when the window is spent."""
+    try:
+        run_watch(once=once, interval=interval, duration=duration)
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":

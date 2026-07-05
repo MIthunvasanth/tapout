@@ -57,9 +57,21 @@ def build_opening_prompt(handoff_md: str) -> str:
     )
 
 
-def render_template(template: list[str], *, binary: str, prompt: str, cwd: str) -> list[str]:
-    """Substitute {binary} {prompt} {cwd} placeholders in an argv template."""
-    subs = {"{binary}": binary, "{prompt}": prompt, "{cwd}": cwd}
+def render_template(
+    template: list[str],
+    *,
+    binary: str,
+    prompt: str = "",
+    cwd: str = "",
+    prompt_file: str = "",
+) -> list[str]:
+    """Substitute {binary} {prompt} {cwd} {prompt_file} placeholders in an argv template."""
+    subs = {
+        "{binary}": binary,
+        "{prompt}": prompt,
+        "{cwd}": cwd,
+        "{prompt_file}": prompt_file,
+    }
     argv: list[str] = []
     for tok in template:
         for placeholder, value in subs.items():
@@ -102,8 +114,11 @@ class ResumePlan:
     agent: str
     entry: AgentEntry
     effective_style: str          # resume_style after any guard downgrade
+    delivery: str                 # 'argv' | 'stdin' | 'file' | 'clipboard'
     exe: Optional[str]            # resolved binary, or None for clipboard_only
     argv: Optional[list[str]]     # what launch() spawns, or None if no launch
+    stdin_text: Optional[str]     # written to child stdin when delivery == 'stdin'
+    prompt_file: Optional[Path]   # written prompt path when delivery == 'file'
     opening: str
     clipboard_ok: bool
     state: TaskState
@@ -133,9 +148,12 @@ def prepare_resume(repo: Path, agent: str) -> ResumePlan:
     clipboard_ok = copy_to_clipboard(opening)
 
     style = entry.resume_style
+    delivery = entry.delivery_kind()
     guard_reason: Optional[str] = None
     exe: Optional[str] = None
     argv: Optional[list[str]] = None
+    stdin_text: Optional[str] = None
+    prompt_file: Optional[Path] = None
     cwd = str(repo)
 
     if style in ("cli_prompt", "clipboard_gui"):
@@ -148,19 +166,40 @@ def prepare_resume(repo: Path, agent: str) -> ResumePlan:
             )
 
     if style == "cli_prompt":
-        if batbadbut_risk(exe, opening):
-            # Downgrade: launch the wrapper WITHOUT the prompt as an argument.
-            guard_reason = (
-                f"resolved launcher is a {os.path.splitext(exe)[1]} wrapper (parsed by "
-                "cmd.exe) and the opening prompt contains shell metacharacters "
-                "(&|%\"^<>). Passing it as an argument risks command injection, so "
-                "tapout falls back to clipboard: the prompt is on your clipboard — "
-                "paste it into the agent once it opens."
+        if delivery == "stdin":
+            # Prompt goes to the child's stdin — bypasses cmd.exe entirely, so no
+            # BatBadBut risk regardless of metacharacters.
+            argv = render_template(entry.launch_template, binary=exe, cwd=cwd)
+            stdin_text = opening
+        elif delivery == "file":
+            prompt_file = tapout_paths(repo)["dir"] / "last-prompt.txt"
+            prompt_file.parent.mkdir(parents=True, exist_ok=True)
+            prompt_file.write_text(opening, encoding="utf-8")
+            argv = render_template(
+                entry.launch_template, binary=exe, cwd=cwd, prompt_file=str(prompt_file)
             )
+            flag = entry.file_flag()
+            if flag and "{prompt_file}" not in "".join(entry.launch_template):
+                argv += [flag, str(prompt_file)]
+        elif delivery == "clipboard":
+            # Explicitly clipboard-only for this CLI: launch bare, paste to begin.
             style = "clipboard_gui"
-            argv = [exe]  # bare launch in cwd
-        else:
-            argv = render_template(entry.launch_template, binary=exe, prompt=opening, cwd=cwd)
+            argv = render_template(entry.launch_template, binary=exe, cwd=cwd) or [exe]
+        else:  # "argv"
+            if batbadbut_risk(exe, opening):
+                # Downgrade: launch the wrapper WITHOUT the prompt as an argument.
+                guard_reason = (
+                    f"resolved launcher is a {os.path.splitext(exe)[1]} wrapper (parsed by "
+                    "cmd.exe) and the opening prompt contains shell metacharacters "
+                    "(&|%\"^<>). Passing it as an argument risks command injection, so "
+                    "tapout falls back to clipboard. Set this agent's prompt_delivery to "
+                    "'stdin' or 'file:<flag>' in the registry to launch with the prompt safely."
+                )
+                style = "clipboard_gui"
+                delivery = "clipboard"
+                argv = [exe]  # bare launch in cwd
+            else:
+                argv = render_template(entry.launch_template, binary=exe, prompt=opening, cwd=cwd)
     elif style == "clipboard_gui":
         argv = render_template(entry.launch_template, binary=exe, prompt=opening, cwd=cwd)
     # clipboard_only: no exe, no argv.
@@ -169,8 +208,11 @@ def prepare_resume(repo: Path, agent: str) -> ResumePlan:
         agent=agent,
         entry=entry,
         effective_style=style,
+        delivery=delivery,
         exe=exe,
         argv=argv,
+        stdin_text=stdin_text,
+        prompt_file=prompt_file,
         opening=opening,
         clipboard_ok=clipboard_ok,
         state=state,
@@ -182,4 +224,17 @@ def launch(plan: ResumePlan, repo: Path) -> subprocess.Popen:
     """Spawn the target agent in `repo`. Only valid when plan.argv is set."""
     if not plan.argv:
         raise ResumeError(f"{plan.agent} has no launch command (clipboard-only).")
+    if plan.stdin_text is not None:
+        # Feed the prompt via stdin — no prompt content touches argv, so cmd.exe
+        # never re-parses it (BatBadBut-safe on Windows .cmd shims).
+        proc = subprocess.Popen(
+            plan.argv, cwd=str(repo), shell=False,
+            stdin=subprocess.PIPE, text=True, encoding="utf-8",
+        )
+        try:
+            proc.stdin.write(plan.stdin_text)
+            proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+        return proc
     return subprocess.Popen(plan.argv, cwd=str(repo), shell=False)

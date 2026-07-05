@@ -1,0 +1,16 @@
+{
+  "name": "tapout",
+  "description": "tapout — limit-aware handoff between AI coding agents",
+  "version": "0.1.0",
+  "owner": { "name": "Mithun" },
+  "plugins": [
+    {
+      "name": "tapout-claude",
+      "displayName": "tapout (Claude Code handoff)",
+      "description": "Auto-capture task state on compact/exit so you can tap out to another agent when Claude hits a limit.",
+      "source": "./plugins/tapout-claude",
+      "license": "MIT",
+      "keywords": ["handoff", "usage-limit", "codex", "gemini", "cursor"]
+    }
+  ]
+}

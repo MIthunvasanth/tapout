@@ -19,7 +19,9 @@ display_name = "Claude Code"
 binaries = ["claude"]
 config_dirs = ["~/.claude"]
 resume_style = "cli_prompt"
-launch_template = ["{binary}", "{prompt}"]
+# `claude -p` reads the prompt from stdin (headless). Bypasses argv/cmd.exe.
+launch_template = ["{binary}", "-p"]
+prompt_delivery = "stdin"
 version_probe = { args = ["--version"], timeout_sec = 5 }
 
 [codex]
@@ -27,7 +29,9 @@ display_name = "Codex CLI"
 binaries = ["codex"]
 config_dirs = ["~/.codex"]
 resume_style = "cli_prompt"
-launch_template = ["{binary}", "{prompt}"]
+# `codex exec -` reads the whole prompt from stdin (non-interactive, agentic).
+launch_template = ["{binary}", "exec", "-"]
+prompt_delivery = "stdin"
 version_probe = { args = ["--version"], timeout_sec = 5 }
 
 [gemini]
@@ -35,7 +39,9 @@ display_name = "Gemini CLI"
 binaries = ["gemini"]
 config_dirs = ["~/.gemini"]
 resume_style = "cli_prompt"
-launch_template = ["{binary}", "-i", "{prompt}"]
+# Bare `gemini` in a non-TTY reads stdin as the prompt (headless). No -p.
+launch_template = ["{binary}"]
+prompt_delivery = "stdin"
 version_probe = { args = ["--version"], timeout_sec = 5 }
 notes = "Deprecated Dec 2025, migrate to Antigravity"
 
