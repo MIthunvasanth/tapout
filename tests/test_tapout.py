@@ -28,6 +28,7 @@ from tapout.capture import (
     condense_transcript,
     find_project_transcript,
     run_capture,
+    run_hook_capture,
 )
 from tapout.detect import resolve_executable
 from tapout.monitor import (
@@ -562,6 +563,81 @@ def test_capture_no_transcript_no_override_errors(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("TAPOUT_CAPTURE_FROM", raising=False)
     with pytest.raises(CaptureError):
         run_capture(tmp_path, "claude", None, force=True)
+
+
+def test_run_capture_uses_transcript_path_from_stdin(tmp_path: Path, monkeypatch):
+    # Hook-invoked capture (use_llm=False): must summarize from the transcript
+    # directly, with NO subprocess call — a nested `claude -p` here would get
+    # killed by session teardown before it could respond (root cause of #1's
+    # SessionEnd silently producing nothing).
+    monkeypatch.delenv("TAPOUT_CAPTURE_FROM", raising=False)
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        json.dumps({"message": {"role": "user", "content": "add a /ping endpoint"}}) + "\n",
+        encoding="utf-8",
+    )
+
+    def _boom(*a, **k):
+        raise AssertionError("summarize_via_claude must not be called on the hook path")
+
+    monkeypatch.setattr("tapout.capture.summarize_via_claude", _boom)
+    monkeypatch.setattr(
+        "tapout.capture.subprocess.run",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no subprocess on the hook path")),
+    )
+
+    state = run_capture(tmp_path, "claude", transcript, force=True, use_llm=False)
+    assert state is not None
+    assert (tmp_path / "HANDOFF.md").exists()
+    assert (tmp_path / ".tapout" / "task-state.json").exists()
+    assert "ping" in state.goal.lower()
+
+
+def test_run_capture_handles_missing_transcript(tmp_path: Path, monkeypatch):
+    # No transcript_path and no override, on the hook path: skip gracefully,
+    # log why, never raise — a hook exit code stains the session UX.
+    monkeypatch.delenv("TAPOUT_CAPTURE_FROM", raising=False)
+    state = run_capture(tmp_path, "claude", None, force=True, use_llm=False)
+    assert state is None
+    log_text = (tmp_path / ".tapout" / "capture.log").read_text(encoding="utf-8")
+    assert "SessionEnd: no transcript payload, skipping" in log_text
+    assert not (tmp_path / "HANDOFF.md").exists()
+
+
+def test_cli_capture_hook_stdin_missing_transcript_exits_zero(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TAPOUT_CAPTURE_FROM", raising=False)
+    result = runner.invoke(app, ["capture", "--agent", "claude", "--hook-stdin", "--force"], input="{}")
+    assert result.exit_code == 0
+    assert not (tmp_path / "HANDOFF.md").exists()
+
+
+def test_run_hook_capture_end_to_end(tmp_path: Path, monkeypatch):
+    # This is the plugin launcher's actual entrypoint (in-process, no
+    # subprocess): a real SessionEnd-shaped JSON payload on stdin should
+    # produce HANDOFF.md + task-state.json in the payload's cwd, with no LLM
+    # call and no manual command — closing #1.
+    monkeypatch.delenv("TAPOUT_CAPTURE_FROM", raising=False)
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        json.dumps({"message": {"role": "user", "content": "add a /ping endpoint"}}) + "\n",
+        encoding="utf-8",
+    )
+    hook_json = json.dumps({
+        "hook_event_name": "SessionEnd",
+        "transcript_path": str(transcript),
+        "cwd": str(tmp_path),
+        "reason": "prompt_input_exit",
+    })
+
+    state = run_hook_capture(hook_json, agent="claude", force=True)
+
+    assert state is not None
+    assert (tmp_path / "HANDOFF.md").exists()
+    assert (tmp_path / ".tapout" / "task-state.json").exists()
+    assert "ping" in state.goal.lower()
+    history = (tmp_path / ".tapout" / "history.jsonl").read_text(encoding="utf-8")
+    assert '"event": "capture"' in history
 
 
 def test_find_project_transcript_picks_newest_toplevel(tmp_path: Path, monkeypatch):

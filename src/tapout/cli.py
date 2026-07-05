@@ -20,7 +20,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 from . import __version__
-from .capture import CaptureError, read_hook_stdin, run_capture
+from .capture import CaptureError, run_capture, run_hook_capture
 from .detect import detect_all, resolve_executable
 from .handoff import (
     SUMMARIZATION_PROMPT,
@@ -333,18 +333,18 @@ def capture(
     force: bool = typer.Option(False, "--force", help="Overwrite existing task-state.json."),
 ) -> None:
     """Non-interactive capture: summarize the session into handoff artifacts."""
-    repo = Path(os.environ.get("CLAUDE_PROJECT_DIR") or Path.cwd())
-    transcript = session_transcript
-
     if hook_stdin:
-        data = read_hook_stdin()
-        transcript = transcript or data.get("transcript_path")
-        if data.get("cwd"):
-            repo = Path(data["cwd"])
+        # Delegate entirely to the in-process hook entrypoint — this is the
+        # subprocess FALLBACK path (the plugin launcher normally calls
+        # run_hook_capture directly, in-process). Same function either way, so
+        # there's exactly one place that parses the hook JSON and captures.
+        run_hook_capture(sys.stdin.read(), agent=agent, force=force)
+        return
 
-    tpath = Path(transcript) if transcript else None
+    repo = Path(os.environ.get("CLAUDE_PROJECT_DIR") or Path.cwd())
+    tpath = Path(session_transcript) if session_transcript else None
     try:
-        state = run_capture(repo, agent, tpath, force)
+        state = run_capture(repo, agent, tpath, force, use_llm=True)
     except CaptureError as exc:
         err.print(f"[yellow]tap capture:[/yellow] {exc}")
         raise typer.Exit(code=1)
@@ -383,5 +383,23 @@ def watch(
         pass
 
 
+def main() -> None:
+    """Entry point for the `tap`/`tapout` console scripts and `python -m tapout`.
+
+    Never fail silently: any exception that escapes typer's own dispatch
+    (SystemExit from typer.Exit/click is passed through untouched) gets one
+    diagnostic line on stderr before exiting non-zero, so a crash in a
+    subprocess-invoked context (e.g. the plugin hook's fallback path) is never
+    a bare non-zero exit code with empty stdout/stderr.
+    """
+    try:
+        app()
+    except SystemExit:
+        raise
+    except Exception as exc:
+        sys.stderr.write(f"tapout: fatal: {exc!r}\n")
+        raise SystemExit(1)
+
+
 if __name__ == "__main__":
-    app()
+    main()

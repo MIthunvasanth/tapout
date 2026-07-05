@@ -12,14 +12,16 @@ import json
 import os
 import re
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 from typing import Optional
 
 from .detect import resolve_executable
 from .handoff import (
+    SCHEMA_VERSION,
     SUMMARIZATION_PROMPT,
+    PlanStep,
+    StepStatus,
     TaskState,
     now_iso,
     parse_task_state,
@@ -43,17 +45,6 @@ class CaptureError(Exception):
 # --------------------------------------------------------------------------
 # hook plumbing
 # --------------------------------------------------------------------------
-
-def read_hook_stdin() -> dict:
-    """Parse the PreCompact / SessionEnd JSON Claude Code writes to stdin."""
-    raw = sys.stdin.read()
-    if not raw.strip():
-        return {}
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
-
 
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 
@@ -165,6 +156,66 @@ def summarize_via_claude(prompt_text: str, timeout: float = 180) -> str:
     return proc.stdout
 
 
+_FILE_TOKEN_RE = re.compile(r"[\w./\\-]+\.[A-Za-z0-9]{1,6}\b")
+
+
+def heuristic_state_from_transcript(
+    transcript_text: str, transcript_path: Path, repo: Path, agent: str
+) -> TaskState:
+    """Build a valid, best-effort TaskState directly from transcript text.
+
+    No LLM call, no subprocess — pure string processing so it finishes in well
+    under a second. Used for hook-invoked capture (SessionEnd/PreCompact),
+    where a nested `claude -p` subprocess would otherwise get killed by session
+    teardown before it can respond. Coarser than the LLM summary, but reliable.
+    """
+    user_lines = [
+        line[len("user:"):].strip()
+        for line in transcript_text.splitlines()
+        if line.lower().startswith("user:")
+    ]
+    first_user = next((l for l in user_lines if l), "")
+    task_title = (first_user[:80].strip() or f"{repo.name} — session capture")
+    goal = (
+        first_user[:400].strip()
+        or "Auto-captured at session end (no LLM summarization available). "
+        "See the linked transcript for full context."
+    )
+
+    seen: set[str] = set()
+    files: list[str] = []
+    for m in _FILE_TOKEN_RE.finditer(transcript_text):
+        tok = m.group(0)
+        if tok not in seen:
+            seen.add(tok)
+            files.append(tok)
+        if len(files) >= 20:
+            break
+
+    return TaskState(
+        schema_version=SCHEMA_VERSION,
+        created_at=now_iso(),
+        source_agent=agent,
+        task_title=task_title,
+        goal=goal,
+        plan=[
+            PlanStep(
+                step="Auto-captured at session end without LLM summarization — "
+                "verify actual progress against the transcript.",
+                status=StepStatus.in_progress,
+            )
+        ],
+        decisions=[],
+        files_touched=files,
+        next_steps=[
+            f"Read the full session transcript at {transcript_path} for complete context.",
+            "Continue the task described in Goal above.",
+        ],
+        blockers=[],
+        commands_to_verify=["git status", "git diff"],
+    )
+
+
 def build_summarization_input(transcript_text: str) -> str:
     return (
         f"{SUMMARIZATION_PROMPT}\n\n"
@@ -214,11 +265,21 @@ def run_capture(
     agent: str,
     transcript_path: Optional[Path],
     force: bool,
+    use_llm: bool = True,
 ) -> Optional[TaskState]:
     """Capture the session into artifacts. Returns the state, or None if skipped.
 
-    Silent: never prompts. All progress goes to .tapout/capture.log. Raises
-    CaptureError only on genuine failure (which the caller logs too).
+    Silent: never prompts. All progress goes to .tapout/capture.log.
+
+    use_llm controls how a bare transcript (no TAPOUT_CAPTURE_FROM override) is
+    turned into a task state:
+      - True (manual `tap capture`, `/tapout:pause`): spawn a fresh `claude -p`
+        for a proper LLM summary. The caller is alive and can tolerate the delay.
+      - False (SessionEnd/PreCompact hooks): summarize with pure string
+        processing, no subprocess. A nested `claude -p` here would get killed
+        by session teardown before it could respond, silently producing nothing.
+        Missing/unreadable transcript is not an error in this mode — it's
+        logged and skipped so a hook never stains the session with exit != 0.
     """
     state_path = tapout_paths(repo)["state"]
     if state_path.exists() and not force:
@@ -230,20 +291,61 @@ def run_capture(
     if override:
         reply = Path(override).read_text(encoding="utf-8")
         log(repo, f"summary source: {ENV_CAPTURE_FROM}={override}")
-    else:
+        state = parse_task_state(reply)
+    elif use_llm:
         if transcript_path is None:
             # Auto-pick the newest session transcript for this project's cwd.
             transcript_path = find_project_transcript(repo)
             log(repo, f"auto-picked transcript {transcript_path}")
         transcript_text = condense_transcript(transcript_path)
         reply = summarize_via_claude(build_summarization_input(transcript_text))
-        log(repo, f"summarized transcript {transcript_path} ({len(transcript_text)} chars)")
+        log(repo, f"summarized transcript {transcript_path} via claude -p ({len(transcript_text)} chars)")
+        state = parse_task_state(reply)
+    else:
+        if transcript_path is None or not transcript_path.exists():
+            log(repo, "SessionEnd: no transcript payload, skipping")
+            return None
+        transcript_text = condense_transcript(transcript_path)
+        state = heuristic_state_from_transcript(transcript_text, transcript_path, repo, agent)
+        log(repo, f"heuristic-summarized transcript {transcript_path}, no LLM ({len(transcript_text)} chars)")
 
-    state = parse_task_state(reply)
     # The capture stamps who/when — the transcript reflects the source agent now.
     state.created_at = now_iso()
     state.source_agent = agent
 
     state_path, handoff_path = write_artifacts_atomic(state, repo)
     log(repo, f"OK wrote {state_path.name} + {handoff_path.name} ('{state.task_title}')")
+    return state
+
+
+def run_hook_capture(
+    hook_json: str, agent: str = "claude", force: bool = True
+) -> Optional[TaskState]:
+    """In-process entrypoint for the plugin's SessionEnd/PreCompact hook.
+
+    Parses Claude Code's hook JSON and captures immediately, IN THIS PROCESS —
+    no subprocess, so a Windows session-teardown kill can't cut a spawned
+    child off mid-flight. Never raises — a hook must not stain the session
+    with a non-zero exit; any failure is logged to .tapout/capture.log so a
+    user hitting this in the wild can debug it.
+    """
+    try:
+        data = json.loads(hook_json) if hook_json.strip() else {}
+    except json.JSONDecodeError:
+        data = {}
+
+    repo = Path(data.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR") or Path.cwd())
+    transcript = data.get("transcript_path")
+    tpath = Path(transcript) if transcript else None
+
+    try:
+        state = run_capture(repo, agent, tpath, force, use_llm=False)
+    except Exception as exc:
+        log(repo, f"SessionEnd: capture failed: {exc!r}")
+        return None
+
+    if state is not None:
+        from .resume import record_history
+        record_history(repo, from_agent=agent, to_agent="(capture)",
+                       task_title=state.task_title, event="capture")
     return state

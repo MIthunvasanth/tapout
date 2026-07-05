@@ -37,8 +37,8 @@ clipboard = ["pyperclip>=1.8"]
 dev = ["pytest>=8.0", "pyperclip>=1.8"]
 
 [project.scripts]
-tap = "tapout.cli:app"
-tapout = "tapout.cli:app"
+tap = "tapout.cli:main"
+tapout = "tapout.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/MIthunvasanth/tapout"
