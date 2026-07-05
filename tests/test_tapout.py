@@ -159,23 +159,24 @@ def test_render_template_substitutes():
     assert render_template(["{binary}", "{cwd}"], binary="x", prompt="P", cwd="C") == ["x", "C"]
 
 
-def test_resolve_executable_prefers_cmd_over_shim(tmp_path: Path, monkeypatch):
+def test_resolve_executable_prefers_cmd_over_shim(monkeypatch):
     # Regression (WinError 193): npm global installs ship an extensionless bash
     # shim next to a real .cmd; the resolver must pick the .cmd, not the shim.
-    shim = tmp_path / "gemini"          # extensionless bash shim
-    shim.write_text("#!/bin/sh\n", encoding="utf-8")
-    cmd = tmp_path / "gemini.cmd"       # real Windows launcher
-    cmd.write_text("@echo off\n", encoding="utf-8")
-    for p in (shim, cmd):
-        p.chmod(0o755)
-
+    # This is Windows-only behavior — simulate it by mocking shutil.which so the
+    # logic runs deterministically on any OS (calling the real which under a
+    # faked sys.platform="win32" hits Windows-only code / case-sensitivity).
     monkeypatch.setattr("tapout.detect.sys.platform", "win32")
     monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
-    monkeypatch.setenv("PATH", str(tmp_path))
+
+    def fake_which(name):
+        # both an extensionless shim and a real .cmd are on PATH
+        return {"gemini": "/x/npm/gemini", "gemini.CMD": "/x/npm/gemini.CMD"}.get(name)
+
+    monkeypatch.setattr("tapout.detect.shutil.which", fake_which)
 
     resolved = resolve_executable("gemini")
     assert resolved is not None
-    assert resolved.lower().endswith(".cmd")
+    assert resolved.lower().endswith(".cmd")  # picked the .cmd, not the bare shim
 
 
 def test_resolve_executable_keeps_explicit_extension(monkeypatch):
