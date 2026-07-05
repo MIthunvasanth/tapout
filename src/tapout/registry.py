@@ -79,7 +79,10 @@ def _bundled_raw() -> dict:
 def _overlay_raw() -> dict:
     if not USER_OVERLAY.exists():
         return {}
-    return _load_toml(USER_OVERLAY.read_text(encoding="utf-8"), str(USER_OVERLAY))
+    # utf-8-sig: Windows tools (PowerShell Out-File, Notepad) default to a
+    # UTF-8 BOM, which tomllib/tomli reject outright. Strips it if present;
+    # identical to utf-8 when it's not.
+    return _load_toml(USER_OVERLAY.read_text(encoding="utf-8-sig"), str(USER_OVERLAY))
 
 
 def _merge(base: dict, overlay: dict) -> dict:

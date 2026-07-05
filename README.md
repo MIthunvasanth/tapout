@@ -32,6 +32,11 @@ claude plugin install tapout@tapout
 ```
 
 - **PreCompact + SessionEnd hooks** refresh `HANDOFF.md` + `.tapout/task-state.json` automatically before Claude compacts context or the session ends. After you `/exit`, the handoff is already written — just `tap codex`.
+  - This first pass is a fast, no-LLM heuristic (instant, survives session teardown). Seconds later, a detached background process refines it into a real LLM summary — `tap refine` runs in the background automatically; opt out per-machine with `~/.tapout/config.toml`:
+    ```toml
+    refine_on_capture = false
+    ```
+    If `claude` isn't on PATH, refinement is skipped silently and the heuristic handoff stands. Run `tap refine --transcript <path> --repo <path>` yourself anytime to re-refine a stale handoff.
 - **`/tapout:pause`** captures on demand mid-session.
 - **`tap watch`** shows a live usage line and prints `run: tap codex` when your 5-hour window is spent. Add the statusline to `~/.claude/settings.json`:
   ```json

@@ -12,6 +12,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -158,6 +159,55 @@ def summarize_via_claude(prompt_text: str, timeout: float = 180) -> str:
 
 _FILE_TOKEN_RE = re.compile(r"[\w./\\-]+\.[A-Za-z0-9]{1,6}\b")
 
+# Pure version strings (2.41.5, 0.4.2, 26.1.2, 9.0.2, 3.12.0, 4.2, ...).
+_VERSION_RE = re.compile(r"^\d+(\.\d+)+([-.]\w+)?$")
+
+# git-bash / MSYS absolute path: /c/Users/... — not a real Windows path.
+_GITBASH_ABS_RE = re.compile(r"^/([A-Za-z])/(.+)$")
+
+# Extensions that mean "this is source/config the session plausibly touched".
+_SOURCE_EXTENSIONS = {
+    "py", "js", "ts", "tsx", "jsx", "md", "json", "yaml", "yml", "toml",
+    "rs", "go", "java", "html", "css", "sql", "sh", "txt", "c", "cpp", "h",
+    "hpp", "rb", "php", "kt", "swift", "ini", "cfg", "env",
+}
+
+# Extensions that are never project source, even when path-shaped (interpreter
+# binaries, compiled artifacts) — e.g. .../Python312/python.exe.
+_DENY_EXTENSIONS = {"exe", "dll", "so", "dylib", "whl", "pyc", "pyo"}
+
+
+def _normalize_path_style(tok: str) -> str:
+    """Rewrite to native path style; fixes git-bash `/c/Users/...` absolutes."""
+    m = _GITBASH_ABS_RE.match(tok)
+    if m and os.name == "nt":
+        drive, rest = m.group(1).upper(), m.group(2)
+        return f"{drive}:\\" + rest.replace("/", "\\")
+    if os.name == "nt":
+        return tok.replace("/", "\\")
+    return tok.replace("\\", "/")
+
+
+def _looks_like_project_file(tok: str) -> bool:
+    """Reject version strings, platform/tool identifiers, and bare binaries."""
+    if _VERSION_RE.match(tok):
+        return False
+    ext = tok.rsplit(".", 1)[-1].lower() if "." in tok else ""
+    if ext in _DENY_EXTENSIONS:
+        return False
+    has_separator = "/" in tok or "\\" in tok
+    has_source_extension = ext in _SOURCE_EXTENSIONS
+    return has_separator or has_source_extension
+
+
+def _extract_files_touched(transcript_text: str) -> list[str]:
+    candidates: set[str] = set()
+    for m in _FILE_TOKEN_RE.finditer(transcript_text):
+        normalized = _normalize_path_style(m.group(0))
+        if _looks_like_project_file(normalized):
+            candidates.add(normalized)
+    return sorted(candidates)[:20]
+
 
 def heuristic_state_from_transcript(
     transcript_text: str, transcript_path: Path, repo: Path, agent: str
@@ -182,15 +232,7 @@ def heuristic_state_from_transcript(
         "See the linked transcript for full context."
     )
 
-    seen: set[str] = set()
-    files: list[str] = []
-    for m in _FILE_TOKEN_RE.finditer(transcript_text):
-        tok = m.group(0)
-        if tok not in seen:
-            seen.add(tok)
-            files.append(tok)
-        if len(files) >= 20:
-            break
+    files = _extract_files_touched(transcript_text)
 
     return TaskState(
         schema_version=SCHEMA_VERSION,
@@ -329,6 +371,14 @@ def run_hook_capture(
     with a non-zero exit; any failure is logged to .tapout/capture.log so a
     user hitting this in the wild can debug it.
     """
+    if os.environ.get("CLAUDE_CODE_CHILD_SESSION"):
+        # A subagent's own session end — not the user's top-level session.
+        # Capturing here would overwrite the real handoff with a subagent's
+        # transcript, and (with refinement) spawn a real claude -p per
+        # subagent. Skip entirely; the top-level session's own SessionEnd
+        # still fires normally.
+        return None
+
     try:
         data = json.loads(hook_json) if hook_json.strip() else {}
     except json.JSONDecodeError:
@@ -348,4 +398,99 @@ def run_hook_capture(
         from .resume import record_history
         record_history(repo, from_agent=agent, to_agent="(capture)",
                        task_title=state.task_title, event="capture")
+        if tpath is not None and refine_on_capture_enabled():
+            if resolve_executable("claude"):
+                spawn_detached_refine(repo, tpath)
+            else:
+                log(repo, "refine: claude not on PATH, skipping auto-refine")
+    return state
+
+
+# --------------------------------------------------------------------------
+# background LLM refinement
+# --------------------------------------------------------------------------
+
+CONFIG_PATH = Path.home() / ".tapout" / "config.toml"
+
+REFINE_TIMEOUT_SEC = 90
+
+
+def refine_on_capture_enabled() -> bool:
+    """~/.tapout/config.toml: `refine_on_capture = false` opts out. Default: on."""
+    if not CONFIG_PATH.exists():
+        return True
+    try:
+        from .registry import _toml
+        # utf-8-sig: Windows tools (PowerShell Out-File, Notepad) default to
+        # writing a UTF-8 BOM, which tomllib/tomli reject outright — a BOM'd
+        # config would otherwise silently fail-open (opt-out ignored, real
+        # background claude -p calls keep firing). utf-8-sig strips it if
+        # present and is identical to utf-8 when it's not.
+        cfg = _toml.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return True
+    return bool(cfg.get("refine_on_capture", True))
+
+
+def spawn_detached_refine(repo: Path, transcript_path: Path) -> None:
+    """Fire-and-forget `tap refine` in a fully detached child process.
+
+    Must survive the parent (Claude Code / this hook process) exiting —
+    that's the whole point: the heuristic handoff is already on disk, and this
+    upgrades it in the background without blocking or risking session
+    teardown killing it. Best-effort: any spawn failure is silently ignored,
+    the heuristic handoff stands.
+    """
+    argv = [
+        sys.executable, "-m", "tapout", "refine",
+        "--transcript", str(transcript_path), "--repo", str(repo),
+    ]
+    try:
+        if sys.platform == "win32":
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+            subprocess.Popen(
+                argv,
+                creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                close_fds=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            subprocess.Popen(
+                argv,
+                start_new_session=True,
+                close_fds=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+    except Exception:
+        pass
+
+
+def run_refine(repo: Path, transcript_path: Path, timeout: float = REFINE_TIMEOUT_SEC) -> Optional[TaskState]:
+    """Upgrade a heuristic handoff to an LLM summary. Never raises.
+
+    Runs (usually) as the detached child `spawn_detached_refine` launches, but
+    is also directly invokable via `tap refine` to manually re-refine a stale
+    handoff. On any failure — claude missing, timeout, invalid JSON — logs one
+    line to .tapout/capture.log and leaves the existing artifacts untouched.
+    """
+    try:
+        if not resolve_executable("claude"):
+            log(repo, "refine: claude not on PATH, skipping")
+            return None
+        transcript_text = condense_transcript(transcript_path)
+        reply = summarize_via_claude(build_summarization_input(transcript_text), timeout=timeout)
+        state = parse_task_state(reply)
+    except Exception as exc:
+        log(repo, f"refine: failed, heuristic handoff kept: {exc!r}")
+        return None
+
+    state.created_at = now_iso()
+    state.source_agent = "claude"
+    write_artifacts_atomic(state, repo)
+    log(repo, f"refined by background LLM at {now_iso()}")
     return state

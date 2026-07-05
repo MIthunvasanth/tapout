@@ -20,7 +20,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 from . import __version__
-from .capture import CaptureError, run_capture, run_hook_capture
+from .capture import CaptureError, run_capture, run_hook_capture, run_refine
 from .detect import detect_all, resolve_executable
 from .handoff import (
     SUMMARIZATION_PROMPT,
@@ -356,6 +356,25 @@ def capture(
     record_history(repo, from_agent=agent, to_agent="(capture)",
                    task_title=state.task_title, event="capture")
     console.print(f"[green]tap capture:[/green] handoff refreshed — '{state.task_title}'")
+
+
+@app.command()
+def refine(
+    transcript: str = typer.Option(..., "--transcript", help="Path to the session transcript (JSONL)."),
+    repo: str = typer.Option(..., "--repo", help="Repo whose HANDOFF.md/task-state.json to refine."),
+) -> None:
+    """Upgrade a heuristic handoff into an LLM summary.
+
+    This is what the background auto-refine spawns after a SessionEnd
+    heuristic capture; also useful standalone to manually re-refine a stale
+    handoff. Silent no-op if claude isn't available — never destroys the
+    existing heuristic artifacts on failure.
+    """
+    state = run_refine(Path(repo), Path(transcript))
+    if state is None:
+        console.print("[dim]tap refine: no change (see .tapout/capture.log for the reason).[/dim]")
+        return
+    console.print(f"[green]tap refine:[/green] handoff refined — '{state.task_title}'")
 
 
 # --------------------------------------------------------------------------

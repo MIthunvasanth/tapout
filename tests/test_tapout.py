@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -24,11 +25,17 @@ from tapout.handoff import (
 )
 from tapout.capture import (
     CaptureError,
+    _extract_files_touched,
     _mangle_cwd,
+    _normalize_path_style,
     condense_transcript,
     find_project_transcript,
+    heuristic_state_from_transcript,
+    refine_on_capture_enabled,
     run_capture,
     run_hook_capture,
+    run_refine,
+    spawn_detached_refine,
 )
 from tapout.detect import resolve_executable
 from tapout.monitor import (
@@ -607,8 +614,26 @@ def test_run_capture_handles_missing_transcript(tmp_path: Path, monkeypatch):
 def test_cli_capture_hook_stdin_missing_transcript_exits_zero(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("TAPOUT_CAPTURE_FROM", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_CHILD_SESSION", raising=False)
     result = runner.invoke(app, ["capture", "--agent", "claude", "--hook-stdin", "--force"], input="{}")
     assert result.exit_code == 0
+    assert not (tmp_path / "HANDOFF.md").exists()
+
+
+def test_run_hook_capture_skips_subagent_sessions(tmp_path: Path, monkeypatch):
+    # A subagent's own SessionEnd must not overwrite the top-level session's
+    # handoff (or spawn a real background refine) — regression for pollution
+    # observed when this repo's own subagents each fired capture against it.
+    monkeypatch.setenv("CLAUDE_CODE_CHILD_SESSION", "1")
+    monkeypatch.delenv("TAPOUT_CAPTURE_FROM", raising=False)
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        json.dumps({"message": {"role": "user", "content": "add a /ping endpoint"}}) + "\n",
+        encoding="utf-8",
+    )
+    hook_json = json.dumps({"transcript_path": str(transcript), "cwd": str(tmp_path)})
+    state = run_hook_capture(hook_json, agent="claude", force=True)
+    assert state is None
     assert not (tmp_path / "HANDOFF.md").exists()
 
 
@@ -618,6 +643,10 @@ def test_run_hook_capture_end_to_end(tmp_path: Path, monkeypatch):
     # produce HANDOFF.md + task-state.json in the payload's cwd, with no LLM
     # call and no manual command — closing #1.
     monkeypatch.delenv("TAPOUT_CAPTURE_FROM", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_CHILD_SESSION", raising=False)
+    # Never spawn a REAL background refine from a test, regardless of the
+    # host's ~/.tapout/config.toml or whether claude happens to be on PATH.
+    monkeypatch.setattr("tapout.capture.spawn_detached_refine", lambda *a, **k: None)
     transcript = tmp_path / "session.jsonl"
     transcript.write_text(
         json.dumps({"message": {"role": "user", "content": "add a /ping endpoint"}}) + "\n",
@@ -638,6 +667,283 @@ def test_run_hook_capture_end_to_end(tmp_path: Path, monkeypatch):
     assert "ping" in state.goal.lower()
     history = (tmp_path / ".tapout" / "history.jsonl").read_text(encoding="utf-8")
     assert '"event": "capture"' in history
+
+
+# --- heuristic files_touched filter (Slice 2.6 quality fix) --------------
+
+# Actual garbage captured from a real /exit on this machine (issue: heuristic
+# handoff was unusable — see the pokpk repro).
+_REAL_GARBAGE_TRANSCRIPT = (
+    "user: build main.py and test_main.py with two endpoints\n"
+    "tool_result: installed typer==2.41.5 click==0.4.2 pip==23.2.1 pip==26.1.2\n"
+    "tool_result: C:\\Users\\User\\AppData\\Local\\Programs\\Python\\Python312\\python.exe\n"
+    "tool_result: platform Windows-11-10.0.26200 python 3.12.0\n"
+    "tool_result: pytest-9.0.2 pluggy-1.6.0 4.12.1 0.7.9 0.1.1 1.3.0 2.1.0 7.0.0 4.2\n"
+    "tool_result: wrote /c/Users/User/Videos/pokpk/main.py\n"
+    "tool_result: wrote /c/Users/User/Videos/pokpk/test_main.py\n"
+)
+
+
+def test_extract_files_touched_rejects_garbage():
+    files = _extract_files_touched(_REAL_GARBAGE_TRANSCRIPT)
+    garbage = [
+        "2.41.5", "0.4.2", "23.2.1", "26.1.2", "3.12.0", "4.12.1", "0.7.9",
+        "0.1.1", "1.3.0", "2.1.0", "7.0.0", "4.2", "9.0.2", "1.6.0",
+        "python.exe", "pytest-9.0.2", "pluggy-1.6.0", "Windows-11-10.0.26200",
+    ]
+    for token in garbage:
+        assert token not in files, f"garbage leaked through: {token!r}"
+
+
+def test_extract_files_touched_keeps_and_normalizes_real_paths():
+    files = _extract_files_touched(_REAL_GARBAGE_TRANSCRIPT)
+    joined = " ".join(files)
+    assert "main.py" in joined
+    assert "test_main.py" in joined
+    if os.name == "nt":
+        # git-bash /c/Users/... must be rewritten to a native C:\ path.
+        assert any(f.startswith("C:\\Users\\User\\Videos\\pokpk") for f in files)
+        assert not any("/c/Users" in f for f in files)
+
+
+def test_extract_files_touched_dedupes_sorts_and_caps():
+    text = "\n".join(f"tool_result: touched src/file{i}.py" for i in range(30))
+    files = _extract_files_touched(text)
+    assert len(files) <= 20
+    assert files == sorted(files)
+    assert len(files) == len(set(files))
+
+
+def test_looks_like_project_file_denies_binary_even_with_separator():
+    # A real interpreter path — has a separator, but .exe is never source.
+    assert _extract_files_touched(
+        r"tool_result: ran C:\Python312\python.exe --version"
+    ) == []
+
+
+def test_normalize_path_style_gitbash_absolute():
+    if os.name == "nt":
+        assert _normalize_path_style("/c/Users/User/Videos/pokpk/main.py") == (
+            r"C:\Users\User\Videos\pokpk\main.py"
+        )
+
+
+def test_heuristic_state_plan_and_next_steps_not_just_an_apology():
+    # Regression guardrail: even the coarse heuristic plan must reference
+    # verifying real progress, not just apologize for lacking an LLM.
+    state = heuristic_state_from_transcript(
+        _REAL_GARBAGE_TRANSCRIPT, Path("t.jsonl"), Path("/repo"), "claude"
+    )
+    assert state.files_touched  # main.py / test_main.py survived
+    assert all("2.41.5" not in f and "python.exe" not in f for f in state.files_touched)
+
+
+# --- background LLM refinement (Slice 2.6) --------------------------------
+
+def test_refine_on_capture_enabled_default_true(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("tapout.capture.CONFIG_PATH", tmp_path / "missing.toml")
+    assert refine_on_capture_enabled() is True
+
+
+def test_refine_on_capture_enabled_opt_out(tmp_path: Path, monkeypatch):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("refine_on_capture = false\n", encoding="utf-8")
+    monkeypatch.setattr("tapout.capture.CONFIG_PATH", cfg)
+    assert refine_on_capture_enabled() is False
+
+
+def test_refine_on_capture_enabled_malformed_file_defaults_true(tmp_path: Path, monkeypatch):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("not [ valid toml", encoding="utf-8")
+    monkeypatch.setattr("tapout.capture.CONFIG_PATH", cfg)
+    assert refine_on_capture_enabled() is True
+
+
+def test_refine_on_capture_enabled_survives_utf8_bom(tmp_path: Path, monkeypatch):
+    # Regression: PowerShell's `Out-File -Encoding utf8` (and Notepad) write a
+    # UTF-8 BOM by default. A BOM'd config used to make tomllib/tomli raise,
+    # which the broad except silently turned into "enabled" — i.e. the
+    # opt-out was invisibly ignored and background claude -p calls kept
+    # firing. Found by dogfooding: a real BOM'd config.toml never took effect.
+    cfg = tmp_path / "config.toml"
+    cfg.write_bytes(b"\xef\xbb\xbf" + b"refine_on_capture = false\n")
+    monkeypatch.setattr("tapout.capture.CONFIG_PATH", cfg)
+    assert refine_on_capture_enabled() is False
+
+
+def test_spawn_detached_refine_uses_detached_flags_on_windows(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("tapout.capture.sys.platform", "win32")
+    captured = {}
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr("tapout.capture.subprocess.Popen", fake_popen)
+    spawn_detached_refine(tmp_path, tmp_path / "t.jsonl")
+
+    assert "refine" in captured["argv"]
+    assert "--transcript" in captured["argv"]
+    assert "--repo" in captured["argv"]
+    assert captured["kwargs"]["creationflags"] & 0x00000008  # DETACHED_PROCESS
+    assert captured["kwargs"]["stdin"] is subprocess.DEVNULL
+    assert captured["kwargs"]["stdout"] is subprocess.DEVNULL
+    assert captured["kwargs"]["stderr"] is subprocess.DEVNULL
+
+
+def test_spawn_detached_refine_uses_new_session_on_posix(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("tapout.capture.sys.platform", "linux")
+    captured = {}
+
+    def fake_popen(argv, **kwargs):
+        captured["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr("tapout.capture.subprocess.Popen", fake_popen)
+    spawn_detached_refine(tmp_path, tmp_path / "t.jsonl")
+
+    assert captured["kwargs"]["start_new_session"] is True
+
+
+def test_spawn_detached_refine_never_raises_on_popen_failure(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "tapout.capture.subprocess.Popen",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("no fork slots")),
+    )
+    spawn_detached_refine(tmp_path, tmp_path / "t.jsonl")  # must not raise
+
+
+def test_run_refine_success_overwrites_with_llm_summary(tmp_path: Path, monkeypatch):
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    write_artifacts(TaskState.model_validate(VALID), tmp_path)  # existing heuristic stand-in
+
+    monkeypatch.setattr("tapout.capture.resolve_executable", lambda name: "/usr/bin/claude")
+    monkeypatch.setattr("tapout.capture.condense_transcript", lambda p: "condensed")
+    monkeypatch.setattr("tapout.capture.summarize_via_claude", lambda text, timeout=90: _block(VALID))
+
+    state = run_refine(tmp_path, transcript)
+
+    assert state is not None
+    log_text = (tmp_path / ".tapout" / "capture.log").read_text(encoding="utf-8")
+    assert "refined by background LLM" in log_text
+
+
+def test_run_refine_no_claude_skips_silently(tmp_path: Path, monkeypatch):
+    write_artifacts(TaskState.model_validate(VALID), tmp_path)
+    monkeypatch.setattr("tapout.capture.resolve_executable", lambda name: None)
+
+    state = run_refine(tmp_path, tmp_path / "t.jsonl")
+
+    assert state is None
+    log_text = (tmp_path / ".tapout" / "capture.log").read_text(encoding="utf-8")
+    assert "claude not on PATH" in log_text
+
+
+def test_run_refine_failure_keeps_heuristic_handoff(tmp_path: Path, monkeypatch):
+    write_artifacts(TaskState.model_validate(VALID), tmp_path)
+    original_handoff = (tmp_path / "HANDOFF.md").read_text(encoding="utf-8")
+
+    monkeypatch.setattr("tapout.capture.resolve_executable", lambda name: "/usr/bin/claude")
+    monkeypatch.setattr("tapout.capture.condense_transcript", lambda p: "condensed")
+
+    def boom(*a, **k):
+        raise CaptureError("claude exited 1: quota exceeded")
+
+    monkeypatch.setattr("tapout.capture.summarize_via_claude", boom)
+
+    state = run_refine(tmp_path, tmp_path / "t.jsonl")
+
+    assert state is None
+    assert (tmp_path / "HANDOFF.md").read_text(encoding="utf-8") == original_handoff
+    log_text = (tmp_path / ".tapout" / "capture.log").read_text(encoding="utf-8")
+    assert "refine: failed, heuristic handoff kept" in log_text
+
+
+def test_run_hook_capture_spawns_refine_when_enabled(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("TAPOUT_CAPTURE_FROM", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_CHILD_SESSION", raising=False)
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        json.dumps({"message": {"role": "user", "content": "add a /ping endpoint"}}) + "\n",
+        encoding="utf-8",
+    )
+    hook_json = json.dumps({"transcript_path": str(transcript), "cwd": str(tmp_path)})
+
+    calls = []
+    monkeypatch.setattr("tapout.capture.refine_on_capture_enabled", lambda: True)
+    monkeypatch.setattr("tapout.capture.resolve_executable", lambda name: "/usr/bin/claude")
+    monkeypatch.setattr(
+        "tapout.capture.spawn_detached_refine",
+        lambda repo, tpath: calls.append((repo, tpath)),
+    )
+
+    run_hook_capture(hook_json, agent="claude", force=True)
+
+    assert calls == [(tmp_path, transcript)]
+
+
+def test_run_hook_capture_skips_refine_when_opted_out(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("TAPOUT_CAPTURE_FROM", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_CHILD_SESSION", raising=False)
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        json.dumps({"message": {"role": "user", "content": "add a /ping endpoint"}}) + "\n",
+        encoding="utf-8",
+    )
+    hook_json = json.dumps({"transcript_path": str(transcript), "cwd": str(tmp_path)})
+
+    monkeypatch.setattr("tapout.capture.refine_on_capture_enabled", lambda: False)
+    monkeypatch.setattr(
+        "tapout.capture.spawn_detached_refine",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not spawn when opted out")),
+    )
+
+    run_hook_capture(hook_json, agent="claude", force=True)  # must not raise
+
+
+def test_run_hook_capture_skips_refine_when_claude_missing(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("TAPOUT_CAPTURE_FROM", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_CHILD_SESSION", raising=False)
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        json.dumps({"message": {"role": "user", "content": "add a /ping endpoint"}}) + "\n",
+        encoding="utf-8",
+    )
+    hook_json = json.dumps({"transcript_path": str(transcript), "cwd": str(tmp_path)})
+
+    monkeypatch.setattr("tapout.capture.refine_on_capture_enabled", lambda: True)
+    monkeypatch.setattr("tapout.capture.resolve_executable", lambda name: None)
+    monkeypatch.setattr(
+        "tapout.capture.spawn_detached_refine",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not spawn when claude is missing")),
+    )
+
+    run_hook_capture(hook_json, agent="claude", force=True)  # must not raise
+    log_text = (tmp_path / ".tapout" / "capture.log").read_text(encoding="utf-8")
+    assert "refine: claude not on PATH, skipping auto-refine" in log_text
+
+
+def test_cli_refine_command(tmp_path: Path, monkeypatch):
+    write_artifacts(TaskState.model_validate(VALID), tmp_path)
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+
+    monkeypatch.setattr("tapout.cli.run_refine", lambda repo, t: TaskState.model_validate(VALID))
+    result = runner.invoke(app, ["refine", "--transcript", str(transcript), "--repo", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "refined" in result.output.lower()
+
+
+def test_cli_refine_command_no_change(tmp_path: Path, monkeypatch):
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+
+    monkeypatch.setattr("tapout.cli.run_refine", lambda repo, t: None)
+    result = runner.invoke(app, ["refine", "--transcript", str(transcript), "--repo", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "no change" in result.output.lower()
 
 
 def test_find_project_transcript_picks_newest_toplevel(tmp_path: Path, monkeypatch):
@@ -764,6 +1070,8 @@ def test_watch_line_formats():
 
 def test_cli_capture_hook_stdin(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CLAUDE_CODE_CHILD_SESSION", raising=False)
+    monkeypatch.setattr("tapout.capture.spawn_detached_refine", lambda *a, **k: None)
     reply = tmp_path / "r.md"
     reply.write_text(_block(VALID), encoding="utf-8")
     monkeypatch.setenv("TAPOUT_CAPTURE_FROM", str(reply))
