@@ -22,18 +22,16 @@ Run `tap scan` to see which agents are installed on this machine.
 
 ## Zero-effort capture (Claude Code plugin)
 
-> **Heads up:** auto-capture hooks are not yet wiring up on the current Claude Code plugin runtime — see [issue #1](https://github.com/MIthunvasanth/tapout/issues/1). The statusline works today; until #1 lands, use the one-command capture below.
-
 Install the bundled Claude Code plugin so capture happens automatically — no manual `tap out`:
 
 ```bash
 git clone https://github.com/MIthunvasanth/tapout.git
 cd tapout
 claude plugin marketplace add ./
-claude plugin install tapout-claude@tapout
+claude plugin install tapout@tapout
 ```
 
-- **PreCompact + SessionEnd hooks** refresh `HANDOFF.md` + `.tapout/task-state.json` before Claude compacts context or the session ends.
+- **PreCompact + SessionEnd hooks** refresh `HANDOFF.md` + `.tapout/task-state.json` automatically before Claude compacts context or the session ends. After you `/exit`, the handoff is already written — just `tap codex`.
 - **`/tapout:pause`** captures on demand mid-session.
 - **`tap watch`** shows a live usage line and prints `run: tap codex` when your 5-hour window is spent. Add the statusline to `~/.claude/settings.json`:
   ```json
@@ -41,25 +39,16 @@ claude plugin install tapout-claude@tapout
   ```
   `tap statusline` prints `tap: N%` and records state that `tap watch` reads.
 
-`tap capture --agent claude` is the machine-invoked capture (used by the hooks): it summarizes the session transcript into the artifacts and writes them atomically.
+## Manual capture (CI / scripting fallback)
 
-## Auto-capture from a Claude Code session (works today)
+If you're not using the plugin, capture from a Claude Code session directly. With no `--session-transcript`, tapout auto-picks the newest session transcript for the current repo:
 
-After a Claude Code session, find the transcript and capture:
-
-```powershell
-# Find the latest session file for your project
-dir $env:USERPROFILE\.claude\projects -Recurse -Filter *.jsonl `
-  | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-
-python -m tapout capture --agent claude --session-transcript "<path from above>"
-tap codex     # or tap cursor, tap gemini
+```bash
+python -m tapout capture --agent claude   # auto-picks this repo's latest session
+tap codex                                  # or tap cursor, tap gemini
 ```
 
-> **Note:** the packaged Claude Code plugin includes a SessionEnd hook and `/tapout:pause`
-> slash command intended to run capture automatically. On some Claude Code versions the
-> plugin runtime does not wire these up (tracked in [issue #1](https://github.com/MIthunvasanth/tapout/issues/1), Slice 2.5). Until that's
-> fixed, use the command above — it's the exact same capture logic the hook would invoke.
+Pass `--session-transcript <path>` to pick a specific transcript. This is the same capture logic the hooks invoke.
 
 ## Zero-install via uvx
 

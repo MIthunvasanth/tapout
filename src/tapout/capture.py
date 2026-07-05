@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -52,6 +53,45 @@ def read_hook_stdin() -> dict:
         return json.loads(raw)
     except json.JSONDecodeError:
         return {}
+
+
+CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
+
+
+def _mangle_cwd(path: Path) -> str:
+    """Claude Code names a project dir by replacing every non-alnum char with '-'."""
+    return re.sub(r"[^A-Za-z0-9]", "-", str(path))
+
+
+def find_project_transcript(repo: Path) -> Path:
+    """Newest top-level session transcript for `repo`'s Claude Code project dir.
+
+    Only considers top-level `*.jsonl` — subagent transcripts live in a
+    `subagents/` subdir and must not be picked. Raises CaptureError (listing
+    candidates) if the project dir or a transcript can't be found.
+    """
+    if not CLAUDE_PROJECTS.exists():
+        raise CaptureError(f"no Claude Code projects directory at {CLAUDE_PROJECTS}")
+
+    target = _mangle_cwd(repo.resolve()).lower()  # drive-letter case varies
+    match = next(
+        (d for d in CLAUDE_PROJECTS.iterdir() if d.is_dir() and d.name.lower() == target),
+        None,
+    )
+    if match is None:
+        available = "\n".join(f"  - {d.name}" for d in sorted(CLAUDE_PROJECTS.iterdir()) if d.is_dir())
+        raise CaptureError(
+            f"no Claude Code session directory for {repo}.\n"
+            f"Expected a dir named '{target}' under {CLAUDE_PROJECTS}.\n"
+            f"Available project dirs:\n{available or '  (none)'}\n"
+            "Pass --session-transcript <path> explicitly, or run this from the repo "
+            "where the Claude session happened."
+        )
+
+    sessions = sorted(match.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not sessions:
+        raise CaptureError(f"no session transcripts (*.jsonl) in {match}")
+    return sessions[0]
 
 
 def condense_transcript(path: Path) -> str:
@@ -192,7 +232,9 @@ def run_capture(
         log(repo, f"summary source: {ENV_CAPTURE_FROM}={override}")
     else:
         if transcript_path is None:
-            raise CaptureError("no transcript path and no summary override available")
+            # Auto-pick the newest session transcript for this project's cwd.
+            transcript_path = find_project_transcript(repo)
+            log(repo, f"auto-picked transcript {transcript_path}")
         transcript_text = condense_transcript(transcript_path)
         reply = summarize_via_claude(build_summarization_input(transcript_text))
         log(repo, f"summarized transcript {transcript_path} ({len(transcript_text)} chars)")

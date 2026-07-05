@@ -22,7 +22,13 @@ from tapout.handoff import (
     render_markdown,
     write_artifacts,
 )
-from tapout.capture import CaptureError, condense_transcript, run_capture
+from tapout.capture import (
+    CaptureError,
+    _mangle_cwd,
+    condense_transcript,
+    find_project_transcript,
+    run_capture,
+)
 from tapout.detect import resolve_executable
 from tapout.monitor import (
     indicator,
@@ -556,6 +562,50 @@ def test_capture_no_transcript_no_override_errors(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("TAPOUT_CAPTURE_FROM", raising=False)
     with pytest.raises(CaptureError):
         run_capture(tmp_path, "claude", None, force=True)
+
+
+def test_find_project_transcript_picks_newest_toplevel(tmp_path: Path, monkeypatch):
+    projects = tmp_path / "projects"
+    repo = tmp_path / "work" / "myrepo"
+    repo.mkdir(parents=True)
+    proj = projects / _mangle_cwd(repo.resolve())
+    proj.mkdir(parents=True)
+    old = proj / "old.jsonl"; old.write_text("{}\n", encoding="utf-8")
+    new = proj / "new.jsonl"; new.write_text("{}\n", encoding="utf-8")
+    subs = proj / "subagents"; subs.mkdir()
+    subf = subs / "agent-x.jsonl"; subf.write_text("{}\n", encoding="utf-8")
+    os.utime(old, (1, 1000))
+    os.utime(new, (1, 2000))
+    os.utime(subf, (1, 9999))  # newest overall, but must be ignored (subagent)
+    monkeypatch.setattr("tapout.capture.CLAUDE_PROJECTS", projects)
+    assert find_project_transcript(repo) == new
+
+
+def test_find_project_transcript_errors_when_no_match(tmp_path: Path, monkeypatch):
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    (projects / "C--some-other-repo").mkdir()
+    monkeypatch.setattr("tapout.capture.CLAUDE_PROJECTS", projects)
+    with pytest.raises(CaptureError, match="no Claude Code session directory"):
+        find_project_transcript(tmp_path / "nope")
+
+
+def test_capture_auto_picks_transcript(tmp_path: Path, monkeypatch):
+    projects = tmp_path / "projects"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    proj = projects / _mangle_cwd(repo.resolve())
+    proj.mkdir(parents=True)
+    (proj / "s.jsonl").write_text(
+        json.dumps({"message": {"role": "user", "content": "do X"}}) + "\n", encoding="utf-8"
+    )
+    monkeypatch.setattr("tapout.capture.CLAUDE_PROJECTS", projects)
+    monkeypatch.setattr("tapout.capture.summarize_via_claude", lambda text, **k: _block(VALID))
+    monkeypatch.delenv("TAPOUT_CAPTURE_FROM", raising=False)
+    state = run_capture(repo, "claude", None, force=True)
+    assert state is not None
+    assert (repo / "HANDOFF.md").exists()
+    assert (repo / ".tapout" / "task-state.json").exists()
 
 
 def test_condense_transcript(tmp_path: Path):

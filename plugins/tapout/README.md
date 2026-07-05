@@ -1,4 +1,4 @@
-# tapout-claude
+# tapout (Claude Code plugin)
 
 Claude Code plugin for [tapout](https://pypi.org/project/tapout/). Makes capture zero-effort: your task state is always fresh, so when Claude hits a usage limit you can `tap codex` (or gemini/cursor) and keep going.
 
@@ -21,14 +21,16 @@ The hook launcher prefers your installed package (`python -m tapout`) and falls 
 From this repo (marketplace):
 
 ```
-/plugin marketplace add <path-or-git-url-to-this-repo>
-/plugin install tapout-claude@tapout
+git clone https://github.com/MIthunvasanth/tapout.git
+cd tapout
+claude plugin marketplace add ./
+claude plugin install tapout@tapout
 ```
 
 Or load locally for one session (no install):
 
 ```
-claude --plugin-dir ./plugins/tapout-claude
+claude --plugin-dir ./plugins/tapout
 ```
 
 ## Statusline setup (optional)
