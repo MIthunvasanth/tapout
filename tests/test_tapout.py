@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -334,17 +335,32 @@ def test_stdin_delivery_bypasses_guard(tmp_path: Path, monkeypatch):
     assert plan.stdin_text == plan.opening  # full prompt goes via stdin
 
 
+def _write_echo_binary(bindir: Path, name: str = "echotool") -> None:
+    """Create a fake agent binary that copies stdin to <bindir>/out.txt.
+
+    Cross-platform: a .cmd shim on Windows (resolved via PATHEXT), an
+    executable POSIX shell script elsewhere (resolved as a plain, extensionless
+    binary — which requires the +x bit that shutil.which checks).
+    """
+    bindir.mkdir(exist_ok=True)
+    if sys.platform == "win32":
+        (bindir / f"{name}.cmd").write_text(
+            "@echo off\n"
+            r'python -c "import sys,io; io.open(r'"'"'%~dp0out.txt'"'"', '"'"'w'"'"', encoding='"'"'utf-8'"'"').write(sys.stdin.read())"'
+            "\n",
+            encoding="utf-8",
+        )
+    else:
+        script = bindir / name
+        script.write_text('#!/bin/sh\ncat > "$(dirname "$0")/out.txt"\n', encoding="utf-8")
+        script.chmod(0o755)
+
+
 def test_stdin_delivery_roundtrips_hostile_chars(tmp_path: Path, monkeypatch):
-    # Real launch: a fake .cmd reads stdin and writes it to a file. Hostile
-    # metacharacters must arrive byte-intact (stdin never touches cmd.exe argv).
+    # Real launch: a fake binary reads stdin and writes it to a file. Hostile
+    # metacharacters must arrive byte-intact (stdin never touches shell argv).
     bindir = tmp_path / "bin"
-    bindir.mkdir()
-    (bindir / "echotool.cmd").write_text(
-        "@echo off\n"
-        r'python -c "import sys,io; io.open(r'"'"'%~dp0out.txt'"'"', '"'"'w'"'"', encoding='"'"'utf-8'"'"').write(sys.stdin.read())"'
-        "\n",
-        encoding="utf-8",
-    )
+    _write_echo_binary(bindir)
     overlay = tmp_path / "agents.toml"
     overlay.write_text(
         '[echotool]\n'
@@ -371,6 +387,16 @@ def test_stdin_delivery_roundtrips_hostile_chars(tmp_path: Path, monkeypatch):
     # the hostile chars survived intact
     for ch in "&|%\"><^":
         assert ch in received
+
+
+def test_resolve_executable_finds_extensionless_binary(tmp_path: Path, monkeypatch):
+    # Regression: a registry binary name with no extension must resolve on the
+    # current OS. On Linux that means a plain +x file (shutil.which checks the
+    # exec bit) — a .cmd-only fixture would fail here, which is what broke CI.
+    bindir = tmp_path / "bin"
+    _write_echo_binary(bindir, name="toolx")
+    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ.get("PATH", ""))
+    assert resolve_executable("toolx") is not None
 
 
 def test_file_delivery_writes_prompt_and_flag(tmp_path: Path, monkeypatch):
