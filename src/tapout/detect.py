@@ -1,4 +1,4 @@
-"""Detect installed AI coding agents on this machine."""
+"""Detect installed AI coding agents — registry-driven."""
 
 from __future__ import annotations
 
@@ -6,8 +6,10 @@ import os
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+
+from .registry import AgentEntry, expand_dirs, load_registry
 
 
 def resolve_executable(name: str) -> str | None:
@@ -30,64 +32,34 @@ def resolve_executable(name: str) -> str | None:
     return shutil.which(name)
 
 
-@dataclass
-class AgentSpec:
-    key: str
-    label: str
-    cmd: str | None  # CLI binary name, or None if GUI-only
-    config_dirs: list[Path] = field(default_factory=list)
-    resumable: str = "yes"  # "yes" or an explanatory note
-
-
-def _home() -> Path:
-    return Path.home()
-
-
-def _cursor_dirs() -> list[Path]:
-    """Windows install / appdata locations for the Cursor editor."""
-    dirs: list[Path] = []
-    local = os.environ.get("LOCALAPPDATA")
-    roaming = os.environ.get("APPDATA")
-    if local:
-        dirs.append(Path(local) / "Programs" / "cursor")
-    if roaming:
-        dirs.append(Path(roaming) / "Cursor")
-    # POSIX config location (harmless on Windows).
-    dirs.append(_home() / ".cursor")
-    return dirs
-
-
-def agent_specs() -> list[AgentSpec]:
-    return [
-        AgentSpec("claude", "Claude Code", "claude", [_home() / ".claude"]),
-        AgentSpec("codex", "Codex CLI", "codex", [_home() / ".codex"]),
-        AgentSpec("gemini", "Gemini CLI", "gemini", [_home() / ".gemini"]),
-        AgentSpec(
-            "cursor",
-            "Cursor",
-            "cursor",
-            _cursor_dirs(),
-            resumable="prompt injection via clipboard",
-        ),
-    ]
+def resolve_binary(entry: AgentEntry) -> str | None:
+    """First of the entry's candidate binaries that resolves on PATH."""
+    for name in entry.binaries:
+        found = resolve_executable(name)
+        if found:
+            return found
+    return None
 
 
 @dataclass
 class DetectionResult:
-    spec: AgentSpec
+    entry: AgentEntry
     installed: bool
     which: str | None
     config_found: Path | None
     version: str | None
 
 
-def _version(exe: str) -> str | None:
+def _version(exe: str, entry: AgentEntry) -> str | None:
+    probe = entry.version_probe
+    if probe is None:
+        return None
     try:
         proc = subprocess.run(
-            [exe, "--version"],
+            [exe, *probe.args],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=probe.timeout_sec,
             shell=False,
         )
     except (subprocess.TimeoutExpired, OSError):
@@ -98,13 +70,13 @@ def _version(exe: str) -> str | None:
     return out.splitlines()[0].strip()
 
 
-def detect_one(spec: AgentSpec) -> DetectionResult:
-    which = resolve_executable(spec.cmd) if spec.cmd else None
-    config_found = next((d for d in spec.config_dirs if d.exists()), None)
+def detect_one(entry: AgentEntry) -> DetectionResult:
+    which = resolve_binary(entry)
+    config_found = next((d for d in expand_dirs(entry.config_dirs) if d.exists()), None)
     installed = bool(which) or config_found is not None
-    version = _version(which) if which else None
+    version = _version(which, entry) if which else None
     return DetectionResult(
-        spec=spec,
+        entry=entry,
         installed=installed,
         which=which,
         config_found=config_found,
@@ -113,4 +85,5 @@ def detect_one(spec: AgentSpec) -> DetectionResult:
 
 
 def detect_all() -> list[DetectionResult]:
-    return [detect_one(s) for s in agent_specs()]
+    registry = load_registry()
+    return [detect_one(entry) for entry in registry.values()]

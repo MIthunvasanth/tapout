@@ -1,0 +1,69 @@
+# tapout bundled agent registry.
+#
+# Data, not code. Add a new agent by adding a [key] table here or — without
+# touching the package — in your own ~/.tapout/agents.toml (user keys win).
+#
+# Fields:
+#   display_name    human label shown by `tap scan`
+#   binaries        candidate command names; first found on PATH wins
+#                   (Windows PATHEXT / .cmd resolution handled automatically)
+#   config_dirs     paths whose existence signals "installed". Supports ~ and
+#                   {APPDATA} / {LOCALAPPDATA} / {HOME} env placeholders.
+#   resume_style    "cli_prompt" | "clipboard_gui" | "clipboard_only"
+#   launch_template argv template. {binary} {prompt} {cwd} are substituted.
+#   version_probe   optional { args = [...], timeout_sec = N }
+#   notes           optional string surfaced by `tap scan`
+
+[claude]
+display_name = "Claude Code"
+binaries = ["claude"]
+config_dirs = ["~/.claude"]
+resume_style = "cli_prompt"
+launch_template = ["{binary}", "{prompt}"]
+version_probe = { args = ["--version"], timeout_sec = 5 }
+
+[codex]
+display_name = "Codex CLI"
+binaries = ["codex"]
+config_dirs = ["~/.codex"]
+resume_style = "cli_prompt"
+launch_template = ["{binary}", "{prompt}"]
+version_probe = { args = ["--version"], timeout_sec = 5 }
+
+[gemini]
+display_name = "Gemini CLI"
+binaries = ["gemini"]
+config_dirs = ["~/.gemini"]
+resume_style = "cli_prompt"
+launch_template = ["{binary}", "-i", "{prompt}"]
+version_probe = { args = ["--version"], timeout_sec = 5 }
+notes = "Deprecated Dec 2025, migrate to Antigravity"
+
+[cursor]
+display_name = "Cursor"
+binaries = ["cursor"]
+config_dirs = ["~/.cursor", "{APPDATA}/Cursor", "{LOCALAPPDATA}/Programs/cursor"]
+resume_style = "clipboard_gui"
+launch_template = ["{binary}", "{cwd}"]
+
+[windsurf]
+display_name = "Windsurf"
+binaries = ["windsurf"]
+config_dirs = ["~/.windsurf", "{APPDATA}/Windsurf", "{LOCALAPPDATA}/Programs/Windsurf"]
+resume_style = "clipboard_gui"
+launch_template = ["{binary}", "{cwd}"]
+
+[aider]
+display_name = "Aider"
+binaries = ["aider"]
+config_dirs = ["~/.aider", "~/.aider.conf.yml"]
+resume_style = "cli_prompt"
+launch_template = ["{binary}", "--message", "{prompt}"]
+version_probe = { args = ["--version"], timeout_sec = 5 }
+
+[copilot]
+display_name = "GitHub Copilot CLI"
+binaries = ["copilot"]
+config_dirs = ["~/.copilot", "~/.config/github-copilot"]
+resume_style = "clipboard_only"
+notes = "No scriptable resume-with-prompt; opening prompt copied to clipboard"

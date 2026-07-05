@@ -116,8 +116,8 @@ def render_markdown(state: TaskState) -> str:
     lines: list[str] = []
     lines.append(f"# Handoff: {state.task_title}\n")
     lines.append(
-        f"> Captured from **{state.source_agent}** at {state.created_at} "
-        f"(schema v{state.schema_version}).\n"
+        f"_Captured from **{state.source_agent}** at {state.created_at} "
+        f"(schema v{state.schema_version})._\n"
     )
     lines.append("\n## Goal\n\n" + state.goal + "\n")
 

@@ -21,12 +21,15 @@ from tapout.handoff import (
     write_artifacts,
 )
 from tapout.detect import resolve_executable
+from tapout.registry import load_registry
 from tapout.resume import (
     ResumeError,
-    build_launch_argv,
+    batbadbut_risk,
     build_opening_prompt,
+    is_batch_wrapper,
     prepare_resume,
     record_history,
+    render_template,
 )
 
 runner = CliRunner()
@@ -137,12 +140,10 @@ def test_load_state_none_when_missing(tmp_path: Path):
 
 # --- resume ---------------------------------------------------------------
 
-def test_launch_argv_per_agent(tmp_path: Path):
-    op = "OPENING"
-    assert build_launch_argv("claude", "claude.exe", op, tmp_path) == ["claude.exe", op]
-    assert build_launch_argv("codex", "codex.exe", op, tmp_path) == ["codex.exe", op]
-    assert build_launch_argv("gemini", "gemini.exe", op, tmp_path) == ["gemini.exe", "-i", op]
-    assert build_launch_argv("cursor", "cursor.exe", op, tmp_path) == ["cursor.exe", str(tmp_path)]
+def test_render_template_substitutes():
+    assert render_template(["{binary}", "{prompt}"], binary="x", prompt="P", cwd="C") == ["x", "P"]
+    assert render_template(["{binary}", "-i", "{prompt}"], binary="g", prompt="P", cwd="C") == ["g", "-i", "P"]
+    assert render_template(["{binary}", "{cwd}"], binary="x", prompt="P", cwd="C") == ["x", "C"]
 
 
 def test_resolve_executable_prefers_cmd_over_shim(tmp_path: Path, monkeypatch):
@@ -189,18 +190,104 @@ def test_prepare_resume_unknown_agent(tmp_path: Path):
 
 def test_prepare_resume_not_installed(tmp_path: Path, monkeypatch):
     write_artifacts(TaskState.model_validate(VALID), tmp_path)
-    monkeypatch.setattr("tapout.resume.resolve_executable", lambda _: None)
+    monkeypatch.setattr("tapout.resume.resolve_binary", lambda _: None)
     with pytest.raises(ResumeError, match="not installed"):
         prepare_resume(tmp_path, "codex")
 
 
 def test_prepare_resume_ok(tmp_path: Path, monkeypatch):
     write_artifacts(TaskState.model_validate(VALID), tmp_path)
-    monkeypatch.setattr("tapout.resume.resolve_executable", lambda _: "/fake/codex")
+    monkeypatch.setattr("tapout.resume.resolve_binary", lambda _: "/fake/codex")
     monkeypatch.setattr("tapout.resume.copy_to_clipboard", lambda _: True)
     plan = prepare_resume(tmp_path, "codex")
     assert plan.argv[0] == "/fake/codex"
+    assert plan.effective_style == "cli_prompt"
     assert plan.state.task_title == "Test task"
+
+
+# --- registry / user overlay ---------------------------------------------
+
+def test_bundled_registry_has_known_agents():
+    reg = load_registry()
+    for key in ("claude", "codex", "gemini", "cursor"):
+        assert key in reg
+    assert reg["gemini"].notes  # deprecation note present
+
+
+def test_user_overlay_adds_agent(tmp_path: Path, monkeypatch):
+    overlay = tmp_path / "agents.toml"
+    overlay.write_text(
+        '[mytool]\n'
+        'display_name = "My Tool"\n'
+        'binaries = ["mytool"]\n'
+        'resume_style = "cli_prompt"\n'
+        'launch_template = ["{binary}", "{prompt}"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tapout.registry.USER_OVERLAY", overlay)
+    reg = load_registry()
+    assert "mytool" in reg
+    assert reg["mytool"].display_name == "My Tool"
+    # bundled agents still present — overlay merges, doesn't replace
+    assert "claude" in reg
+
+
+def test_user_overlay_field_wins(tmp_path: Path, monkeypatch):
+    overlay = tmp_path / "agents.toml"
+    overlay.write_text('[gemini]\ndisplay_name = "Gemini (mine)"\n', encoding="utf-8")
+    monkeypatch.setattr("tapout.registry.USER_OVERLAY", overlay)
+    reg = load_registry()
+    assert reg["gemini"].display_name == "Gemini (mine)"
+    assert reg["gemini"].binaries == ["gemini"]  # non-overridden field survives
+
+
+def test_prepare_resume_user_added_agent(tmp_path: Path, monkeypatch):
+    overlay = tmp_path / "agents.toml"
+    overlay.write_text(
+        '[mytool]\n'
+        'display_name = "My Tool"\n'
+        'binaries = ["mytool"]\n'
+        'resume_style = "cli_prompt"\n'
+        'launch_template = ["{binary}", "{prompt}"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("tapout.registry.USER_OVERLAY", overlay)
+    write_artifacts(TaskState.model_validate(VALID), tmp_path)
+    monkeypatch.setattr("tapout.resume.resolve_binary", lambda _: "/fake/mytool")
+    plan = prepare_resume(tmp_path, "mytool")
+    assert plan.effective_style == "cli_prompt"
+    assert plan.argv == ["/fake/mytool", plan.opening]
+
+
+# --- BatBadBut guard ------------------------------------------------------
+
+def test_batbadbut_risk_detection():
+    assert is_batch_wrapper("C:/x/codex.cmd")
+    assert is_batch_wrapper("C:/x/codex.BAT")
+    assert not is_batch_wrapper("C:/x/codex.exe")
+    assert batbadbut_risk("x.cmd", "hello & del")     # metachar on a .cmd
+    assert not batbadbut_risk("x.cmd", "hello world")  # clean prompt on a .cmd
+    assert not batbadbut_risk("x.exe", "hello & del")  # metachar but not a wrapper
+
+
+def test_batbadbut_guard_downgrades_on_cmd(tmp_path: Path, monkeypatch):
+    hostile = json.loads(json.dumps(VALID))
+    hostile["goal"] = 'danger & echo | set %X% say "hi"'
+    write_artifacts(TaskState.model_validate(hostile), tmp_path)
+    monkeypatch.setattr("tapout.resume.resolve_binary", lambda _: "C:/x/codex.cmd")
+    plan = prepare_resume(tmp_path, "codex")
+    assert plan.effective_style == "clipboard_gui"
+    assert plan.guard_reason is not None
+    assert plan.argv == ["C:/x/codex.cmd"]  # bare launch, prompt NOT in argv
+
+
+def test_batbadbut_clean_prompt_launches_on_cmd(tmp_path: Path, monkeypatch):
+    write_artifacts(TaskState.model_validate(VALID), tmp_path)  # clean fields
+    monkeypatch.setattr("tapout.resume.resolve_binary", lambda _: "C:/x/codex.cmd")
+    plan = prepare_resume(tmp_path, "codex")
+    assert plan.effective_style == "cli_prompt"
+    assert plan.guard_reason is None
+    assert plan.argv == ["C:/x/codex.cmd", plan.opening]
 
 
 def test_record_history(tmp_path: Path):
@@ -268,9 +355,33 @@ def test_cli_resume_no_state(tmp_path: Path, monkeypatch):
 def test_cli_resume_dry_run(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     write_artifacts(TaskState.model_validate(VALID), tmp_path)
-    monkeypatch.setattr("tapout.resume.resolve_executable", lambda _: "/fake/codex")
+    monkeypatch.setattr("tapout.resume.resolve_binary", lambda _: "/fake/codex")
     result = runner.invoke(app, ["codex", "--dry-run"])
     assert result.exit_code == 0
     assert "not launching" in result.output
     # history recorded even on dry run
     assert (tmp_path / ".tapout" / "history.jsonl").exists()
+
+
+def test_cli_resume_generic_subcommand(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    write_artifacts(TaskState.model_validate(VALID), tmp_path)
+    monkeypatch.setattr("tapout.resume.resolve_binary", lambda _: "/fake/codex")
+    result = runner.invoke(app, ["resume", "codex", "--dry-run"])
+    assert result.exit_code == 0
+    assert "not launching" in result.output
+
+
+def test_cli_out_requires_force_when_state_exists(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    first = runner.invoke(app, ["out", "--from", str(DEMO)])
+    assert first.exit_code == 0, first.output
+    # second run refuses without --force
+    second = runner.invoke(app, ["out", "--from", str(DEMO)])
+    assert second.exit_code == 1
+    assert "already exists" in second.output
+    # --force overwrites
+    forced = runner.invoke(app, ["out", "--from", str(DEMO), "--force"])
+    assert forced.exit_code == 0, forced.output
+    hist = (tmp_path / ".tapout" / "history.jsonl").read_text(encoding="utf-8")
+    assert '"event": "capture"' in hist
