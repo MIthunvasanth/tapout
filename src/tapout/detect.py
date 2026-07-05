@@ -22,7 +22,9 @@ def resolve_executable(name: str) -> str | None:
     """
     if sys.platform == "win32" and not os.path.splitext(name)[1]:
         pathext = os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD")
-        for ext in pathext.split(os.pathsep):
+        # PATHEXT is always ';'-delimited on Windows (not os.pathsep, which the
+        # value happens to match on Windows but not elsewhere).
+        for ext in pathext.split(";"):
             ext = ext.strip()
             if not ext:
                 continue
