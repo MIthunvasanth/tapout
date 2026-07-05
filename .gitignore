@@ -10,7 +10,10 @@ build/
 .venv/
 venv/
 
-# tapout scratch: history and cache are transient runtime state.
+# tapout scratch: history, logs, and cache are transient runtime state.
 # HANDOFF.md + .tapout/task-state.json are meant to be committed by users.
 .tapout/history.jsonl
+.tapout/capture.log
+.tapout/last-prompt.txt
+.tapout/pause-input.json
 .tapout/*.cache

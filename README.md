@@ -31,6 +31,24 @@ Install the bundled Claude Code plugin so capture happens automatically — no m
 
 `tap capture --agent claude` is the machine-invoked capture (used by the hooks): it summarizes the session transcript into the artifacts and writes them atomically.
 
+## Auto-capture from a Claude Code session (works today)
+
+After a Claude Code session, find the transcript and capture:
+
+```powershell
+# Find the latest session file for your project
+dir $env:USERPROFILE\.claude\projects -Recurse -Filter *.jsonl `
+  | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+
+python -m tapout capture --agent claude --session-transcript "<path from above>"
+tap codex     # or tap cursor, tap gemini
+```
+
+> **Note:** the packaged Claude Code plugin includes a SessionEnd hook and `/tapout:pause`
+> slash command intended to run capture automatically. On some Claude Code versions the
+> plugin runtime does not wire these up (tracked in issue #TBD, Slice 2.5). Until that's
+> fixed, use the command above — it's the exact same capture logic the hook would invoke.
+
 ## Zero-install via uvx
 
 Once published, the hooks (and you) can run tapout without installing it: `uvx tapout <command>`. The plugin's hook launcher prefers your installed package and falls back to `uvx tapout`.
@@ -63,6 +81,7 @@ The first `tap <agent>` in a repo may hit the *receiving* agent's own setup: tru
 
 - npm-installed agents ship both an extensionless shim and a real `.cmd`; tapout resolves the `.cmd` (PATHEXT-aware) so launches don't fail with WinError 193.
 - When an **argv-delivery** launcher is a `.cmd`/`.bat` and the handoff contains shell metacharacters (`& | % " ^ < >`), tapout will not pass the prompt as a command-line argument (cmd.exe would re-parse it — the "BatBadBut" class of bug). It falls back to clipboard. Agents using `stdin` or `file` delivery (codex, gemini, claude) avoid this entirely.
+- PowerShell's `type` may mangle UTF-8; run `chcp 65001` first, or open `HANDOFF.md` in an editor.
 
 ---
 
