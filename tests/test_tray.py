@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -426,6 +427,7 @@ def test_uninstall_autostart_noop_when_absent(tmp_path: Path, monkeypatch):
     assert tray.uninstall_autostart() is False
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="autostart is Windows-only by design")
 def test_cli_install_uninstall_autostart(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("tapout.tray.STARTUP_DIR", tmp_path)
 
@@ -443,6 +445,13 @@ def test_cli_install_uninstall_autostart(tmp_path: Path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "removed" in result.output.lower()
     assert not (tmp_path / "tapout-buddy.lnk").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="only exercises the non-Windows refusal path")
+def test_cli_install_autostart_refuses_on_non_windows():
+    result = runner.invoke(app, ["buddy", "install-autostart"])
+    assert result.exit_code == 1
+    assert "windows-only" in result.output.lower()
 
 
 # --------------------------------------------------------------------------
@@ -615,7 +624,33 @@ def test_poll_once_uses_cache_not_raw_detect_all(tmp_path: Path, monkeypatch):
     assert calls == [1]
 
 
-def test_tray_deps_available_true_when_installed():
+def test_tray_deps_available_never_raises_and_returns_a_bool():
+    # pystray/PIL ARE installed in this test env, but pystray's Linux Xorg
+    # backend probes the display at import time — on a headless box (no
+    # DISPLAY: CI, SSH, Docker) that raises Xlib.error, not ImportError. The
+    # contract is "never a traceback, always a clean (bool, str) verdict" —
+    # not "always True" (platform/environment-dependent).
     ok, err = tray.tray_deps_available()
-    assert ok is True
-    assert err == ""
+    assert isinstance(ok, bool)
+    assert isinstance(err, str)
+    if sys.platform == "win32":
+        assert ok is True
+        assert err == ""
+
+
+def test_tray_deps_available_catches_non_import_errors(monkeypatch):
+    # Simulates exactly the headless-Linux Xlib.error.DisplayNameError case:
+    # the module "imports" but raises a non-ImportError during init.
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "pystray":
+            raise RuntimeError("Bad display name \"\"")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    ok, err = tray.tray_deps_available()
+    assert ok is False
+    assert "display" in err.lower()

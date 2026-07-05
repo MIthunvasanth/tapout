@@ -512,10 +512,18 @@ def run_dry_run() -> None:
 # --------------------------------------------------------------------------
 
 def tray_deps_available() -> tuple[bool, str]:
+    """True if the tray can actually run here — not just 'is it installed'.
+
+    On Linux, pystray's Xorg backend probes the display AT IMPORT TIME, so a
+    headless box (no DISPLAY, e.g. CI/SSH/Docker) raises Xlib.error, not
+    ImportError. Catch broadly: any failure here means "can't run the tray",
+    and the caller's contract is to degrade to one clean line, never a
+    traceback — a narrow except would let that escape uncaught.
+    """
     try:
         import pystray  # noqa: F401
         import PIL  # noqa: F401
-    except ImportError as exc:
+    except Exception as exc:
         return False, str(exc)
     return True, ""
 
