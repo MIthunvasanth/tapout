@@ -22,11 +22,15 @@ Run `tap scan` to see which agents are installed on this machine.
 
 ## Zero-effort capture (Claude Code plugin)
 
+> **Heads up:** auto-capture hooks are not yet wiring up on the current Claude Code plugin runtime — see [issue #1](https://github.com/MIthunvasanth/tapout/issues/1). The statusline works today; until #1 lands, use the one-command capture below.
+
 Install the bundled Claude Code plugin so capture happens automatically — no manual `tap out`:
 
-```
-/plugin marketplace add <this-repo>
-/plugin install tapout-claude@tapout
+```bash
+git clone https://github.com/MIthunvasanth/tapout.git
+cd tapout
+claude plugin marketplace add ./
+claude plugin install tapout-claude@tapout
 ```
 
 - **PreCompact + SessionEnd hooks** refresh `HANDOFF.md` + `.tapout/task-state.json` before Claude compacts context or the session ends.
