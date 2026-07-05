@@ -4,6 +4,14 @@ Your coding agent tapped out? Tag in the next one.
 
 Hit your Claude Code limit mid-task — `tap codex` and it picks up exactly where you left off. Same task, same plan, same progress. No re-explaining.
 
+## Install
+
+```bash
+pip install tapout
+```
+
+Installs two equivalent console commands, `tap` and `tapout`. Python 3.10+.
+
 ## How it works
 
 1. `tap out` — prints a summarization prompt (also copied to your clipboard). Paste it into your current agent; it replies with a task-state JSON block.

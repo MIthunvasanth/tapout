@@ -4,20 +4,26 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tapout"
-version = "0.1.0.dev0"
-description = "Limit-aware handoff between AI coding agents. Your coding agent tapped out? Tag in the next one."
+dynamic = ["version"]
+description = "Pass the baton between AI coding agents - hit a limit in Claude Code, resume exactly where you left off in Codex, Gemini, or Cursor."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "Mithun" }]
 keywords = ["ai", "agents", "claude", "codex", "gemini", "cursor", "handoff", "cli"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Environment :: Console",
+    "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Utilities",
 ]
 dependencies = [
     "typer>=0.12",
@@ -35,7 +41,9 @@ tap = "tapout.cli:app"
 tapout = "tapout.cli:app"
 
 [project.urls]
-Homepage = "https://pypi.org/project/tapout/"
+Homepage = "https://github.com/MIthunvasanth/tapout"
+Repository = "https://github.com/MIthunvasanth/tapout"
+Issues = "https://github.com/MIthunvasanth/tapout/issues"
 
 [tool.hatch.version]
 path = "src/tapout/__init__.py"
